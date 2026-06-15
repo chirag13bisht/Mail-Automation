@@ -18,7 +18,7 @@ from datetime import datetime
 #   Windows PowerShell: $env:SMTP_EMAIL="admin@mobifirst.co"
 #   Windows PowerShell: $env:SMTP_PASSWORD="your-password-here"
 SENDER_EMAIL    = os.environ.get("SMTP_EMAIL", "admin@mobifirst.co")
-SENDER_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+SENDER_PASSWORD = os.environ.get("SMTP_PASSWORD", "$Brando4410$$")
 
 if not SENDER_PASSWORD:
     raise ValueError("❌ SMTP_PASSWORD environment variable not set! See instructions above.")
