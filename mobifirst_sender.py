@@ -1,49 +1,36 @@
 import pandas as pd
-import smtplib
-import imaplib
-import email
+import requests
+import msal
 import time
 import random
 import re
-import os
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+import imaplib
+import email
 from datetime import datetime
 
 # ==========================================
-# 1. CONFIGURATION & CREDENTIALS
+# 1. CONFIGURATION
 # ==========================================
-# ✅ FIX 1: Use environment variables instead of hardcoded passwords
-# Before running, set these in your terminal:
-#   Windows PowerShell: $env:SMTP_EMAIL="admin@mobifirst.co"
-#   Windows PowerShell: $env:SMTP_PASSWORD="your-password-here"
-SENDER_EMAIL    = os.environ.get("SMTP_EMAIL", "admin@mobifirst.co")
-SENDER_PASSWORD = os.environ.get("SMTP_PASSWORD", "$Brando4410$$")
+SENDER_EMAIL  = "admin@mobifirst.co"
 
-if not SENDER_PASSWORD:
-    raise ValueError("❌ SMTP_PASSWORD environment variable not set! See instructions above.")
+# ✅ Paste your Azure App values here:
+CLIENT_ID     = "dabde45a-de62-44f1-a15d-1572327a9302"
+CLIENT_SECRET = "a5ca72d8-f1af-4c3a-ac8a-5727d35fe0bb"
+TENANT_ID     = "f14f07b0-a186-41e6-a3b4-19cfd15af98c"
 
-SMTP_SERVER  = "smtp.office365.com"
-SMTP_PORT    = 587
-IMAP_SERVER  = "outlook.office365.com"
-
-DATABASE_FILE = "MobiFirst_Master_List.xlsx"
-
+DATABASE_FILE        = "MobiFirst_Master_List.xlsx"
 BATCH_SIZE           = 500
 BATCH_DELAY_SECONDS  = 1800   # 30 mins between batches
-EMAIL_DELAY_SECONDS  = 2      # 2 sec between emails (stays under 30/min limit)
-DAILY_LIMIT          = 10000  # Microsoft's hard 24-hour limit
-PAUSE_24H_SECONDS    = 86400  # 24 hours in seconds
+EMAIL_DELAY_SECONDS  = 2      # 2 sec between emails
+DAILY_LIMIT          = 10000
+PAUSE_24H_SECONDS    = 86400
 
-# ✅ FIX 2: Unsubscribe link added (required by CAN-SPAM law)
-# Replace this URL with your actual unsubscribe page
 UNSUBSCRIBE_URL = "https://mobifirst.co/unsubscribe"
 
 # ==========================================
-# 2. EMAIL TEMPLATES (with unsubscribe footer)
+# 2. EMAIL TEMPLATES
 # ==========================================
 def build_email_body(body_content: str) -> str:
-    """Wraps email body with a legal unsubscribe footer."""
     return f"""
     {body_content}
     <br><br>
@@ -51,7 +38,7 @@ def build_email_body(body_content: str) -> str:
     <p style="font-size:11px;color:#999;text-align:center;">
         You're receiving this because you previously used MobiFirst.<br>
         <a href="{UNSUBSCRIBE_URL}" style="color:#999;">Unsubscribe</a> | 
-        MobiFirst, your address here
+        MobiFirst
     </p>
     """
 
@@ -79,24 +66,82 @@ templates = [
 ]
 
 # ==========================================
-# 3. LIST HYGIENE: BOUNCE HANDLER (IMAP)
+# 3. GRAPH API TOKEN
+# ==========================================
+_token_cache = {"token": None, "expires_at": 0}
+
+def get_access_token() -> str:
+    """Gets a cached token or fetches a new one."""
+    if _token_cache["token"] and time.time() < _token_cache["expires_at"] - 60:
+        return _token_cache["token"]
+
+    app = msal.ConfidentialClientApplication(
+        CLIENT_ID,
+        authority=f"https://login.microsoftonline.com/{TENANT_ID}",
+        client_credential=CLIENT_SECRET
+    )
+    result = app.acquire_token_for_client(
+        scopes=["https://graph.microsoft.com/.default"]
+    )
+    if "access_token" not in result:
+        raise Exception(f"❌ Token error: {result.get('error_description')}")
+
+    _token_cache["token"] = result["access_token"]
+    _token_cache["expires_at"] = time.time() + result.get("expires_in", 3600)
+    return _token_cache["token"]
+
+# ==========================================
+# 4. SEND EMAIL VIA GRAPH API
+# ==========================================
+def send_email_graph(to: str, subject: str, body: str) -> bool:
+    """Sends a single email via Microsoft Graph API (no SMTP needed)."""
+    try:
+        token = get_access_token()
+        response = requests.post(
+            f"https://graph.microsoft.com/v1.0/users/{SENDER_EMAIL}/sendMail",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "message": {
+                    "subject": subject,
+                    "body": {
+                        "contentType": "HTML",
+                        "content": body
+                    },
+                    "toRecipients": [
+                        {"emailAddress": {"address": to}}
+                    ]
+                },
+                "saveToSentItems": "true"
+            },
+            timeout=30
+        )
+        return response.status_code == 202
+    except Exception as e:
+        print(f"    Graph API error: {e}")
+        return False
+
+# ==========================================
+# 5. BOUNCE HANDLER (IMAP)
 # ==========================================
 def process_bounces(df):
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Connecting to inbox to check for bounces...")
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Checking inbox for bounces...")
     try:
-        mail = imaplib.IMAP4_SSL(IMAP_SERVER)
-        mail.login(SENDER_EMAIL, SENDER_PASSWORD)
+        mail = imaplib.IMAP4_SSL("outlook.office365.com")
+        mail.login(SENDER_EMAIL, "your-password-here")  # IMAP still needs password
         mail.select("inbox")
 
         status, messages = mail.search(None, '(SUBJECT "Undeliverable")')
         email_ids = messages[0].split()
 
         if not email_ids:
-            print("No new bouncebacks found.")
+            print("  No new bounces found.")
             mail.logout()
             return df
 
-        print(f"Found {len(email_ids)} bounce reports. Updating database...")
+        print(f"  Found {len(email_ids)} bounce reports. Updating database...")
         email_regex = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
 
         for e_id in email_ids:
@@ -122,56 +167,53 @@ def process_bounces(df):
 
         mail.expunge()
         mail.logout()
-        print("Bounce processing complete.")
+        print("  Bounce processing complete.")
     except Exception as e:
-        print(f"Error checking bounces: {e}")
+        print(f"  Bounce check skipped: {e}")
 
     return df
 
 # ==========================================
-# 4. SMTP CONNECTION HELPER
-# ==========================================
-def connect_smtp(retries=3):
-    """✅ FIX 3: Reconnect handler with retries so crashes mid-batch are recovered."""
-    for attempt in range(retries):
-        try:
-            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
-            server.starttls()
-            server.login(SENDER_EMAIL, SENDER_PASSWORD)
-            print(f"  [SMTP] Connected successfully.")
-            return server
-        except Exception as e:
-            print(f"  [SMTP] Connection attempt {attempt+1} failed: {e}")
-            time.sleep(10)
-    return None
-
-# ==========================================
-# 5. SENDING ENGINE
+# 6. MAIN ENGINE
 # ==========================================
 def main_engine():
-    # ✅ FIX 4: Validate Excel columns before starting
+    # Validate Excel columns
     try:
         df_check = pd.read_excel(DATABASE_FILE)
         required_columns = ['Email Address', 'Status']
         missing = [col for col in required_columns if col not in df_check.columns]
         if missing:
             print(f"❌ Missing columns in Excel: {missing}")
-            print(f"   Your Excel must have these exact column names: {required_columns}")
             return
     except Exception as e:
-        print(f"❌ Cannot open database file: {e}")
+        print(f"❌ Cannot open database: {e}")
+        return
+
+    # Validate Graph API credentials
+    if "your-client-id-here" in CLIENT_ID:
+        print("❌ Please update CLIENT_ID, CLIENT_SECRET, and TENANT_ID in the script!")
         return
 
     print("=" * 55)
     print("  MobiFirst AI Sender Engine — Starting Up")
     print("=" * 55)
     print(f"  Sender      : {SENDER_EMAIL}")
+    print(f"  Mode        : Microsoft Graph API ✅")
     print(f"  Database    : {DATABASE_FILE}")
     print(f"  Batch Size  : {BATCH_SIZE} emails")
     print(f"  Email Delay : {EMAIL_DELAY_SECONDS} seconds")
     print(f"  Batch Rest  : {BATCH_DELAY_SECONDS/60:.0f} minutes")
     print(f"  Daily Limit : {DAILY_LIMIT}")
     print("=" * 55)
+
+    # Test token on startup
+    try:
+        get_access_token()
+        print("  ✅ Graph API token obtained successfully!")
+    except Exception as e:
+        print(f"  ❌ Graph API auth failed: {e}")
+        print("  Check your CLIENT_ID, CLIENT_SECRET, TENANT_ID values.")
+        return
 
     total_sent_today = 0
 
@@ -186,7 +228,7 @@ def main_engine():
 
         pending_indices = df.index[df['Status'] == 'Pending'].tolist()
         if not pending_indices:
-            # ✅ FINAL SUMMARY when entire campaign is done
+            # Final summary
             sent_count    = len(df[df['Status'] == 'Sent'])
             bounced_count = len(df[df['Status'] == 'Bounced'])
             failed_count  = len(df[df['Status'] == 'Failed'])
@@ -215,15 +257,8 @@ def main_engine():
             continue
 
         batch_indices = pending_indices[:BATCH_SIZE]
-        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Starting batch — {len(batch_indices)} emails to send...")
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Starting batch — {len(batch_indices)} emails...")
         print(f"  Progress today: {total_sent_today}/{DAILY_LIMIT}")
-
-        # ✅ FIX 3: Use reconnect helper
-        server = connect_smtp()
-        if not server:
-            print("❌ Could not connect to SMTP after 3 attempts. Waiting 5 minutes...")
-            time.sleep(300)
-            continue
 
         batch_success = 0
         for idx in batch_indices:
@@ -232,52 +267,29 @@ def main_engine():
 
             recipient_email = str(df.at[idx, 'Email Address']).strip()
 
-            # Skip obviously invalid emails
             if '@' not in recipient_email or '.' not in recipient_email:
                 df.at[idx, 'Status'] = 'Invalid'
                 continue
 
             template = random.choice(templates)
-
-            msg = MIMEMultipart()
-            msg['From']    = SENDER_EMAIL
-            msg['To']      = recipient_email
-            msg['Subject'] = template['Subject']
-
-            # ✅ FIX 2: Add unsubscribe footer to every email
             full_body = build_email_body(template['Body'])
-            msg.attach(MIMEText(full_body, 'html'))
 
-            try:
-                # ✅ FIX 3: Auto-reconnect if connection dropped
-                try:
-                    server.noop()
-                except Exception:
-                    print("  [SMTP] Connection lost. Reconnecting...")
-                    server = connect_smtp()
-                    if not server:
-                        break
+            success = send_email_graph(recipient_email, template['Subject'], full_body)
 
-                server.send_message(msg)
+            if success:
                 df.at[idx, 'Status'] = 'Sent'
                 batch_success += 1
                 total_sent_today += 1
                 print(f"  ✅ [{total_sent_today}/{DAILY_LIMIT}] Sent → {recipient_email}")
-
-            except Exception as e:
-                print(f"  ❌ Failed → {recipient_email}: {e}")
+            else:
                 df.at[idx, 'Status'] = 'Failed'
+                print(f"  ❌ Failed → {recipient_email}")
 
             time.sleep(EMAIL_DELAY_SECONDS)
 
-        try:
-            server.quit()
-        except Exception:
-            pass
-
         df.to_excel(DATABASE_FILE, index=False)
 
-        # ✅ SUMMARY after every batch
+        # Batch summary
         sent_count    = len(df[df['Status'] == 'Sent'])
         pending_count = len(df[df['Status'] == 'Pending'])
         bounced_count = len(df[df['Status'] == 'Bounced'])
