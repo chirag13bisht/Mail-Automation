@@ -15,7 +15,7 @@ SENDER_EMAIL  = "admin@mobifirst.co"
 
 # ✅ Paste your Azure App values here:
 CLIENT_ID     = "dabde45a-de62-44f1-a15d-1572327a9302"
-CLIENT_SECRET = "a5ca72d8-f1af-4c3a-ac8a-5727d35fe0bb"
+CLIENT_SECRET = "Hh38Q~ffccw6d6WnCNRlIrnwljKZHn7ucZi13aqO"
 TENANT_ID     = "f14f07b0-a186-41e6-a3b4-19cfd15af98c"
 
 DATABASE_FILE        = "MobiFirst_Master_List.xlsx"
