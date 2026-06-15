@@ -1,0 +1,1 @@
+worker: python mobifirst_sender.py
